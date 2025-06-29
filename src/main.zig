@@ -4,11 +4,14 @@ const c = @cImport({
 });
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Vec3d = @Vector(3, f32);
+const Vec4d = @Vector(4, f32);
 
 // OpenGL objects struct to keep related data together
 const OpenGLObjects = struct {
     VAO: c.GLuint,
     VBO: c.GLuint,
+    num_vertices: c_ulonglong,
     shader_program: c.GLuint,
 };
 
@@ -79,6 +82,7 @@ fn setupVertexData(allocator: Allocator) !OpenGLObjects {
     // Set up VBO
     c.glBindBuffer(c.GL_ARRAY_BUFFER, VBO);
     const vertices_size: c_longlong = @intCast(vertices.len * @sizeOf(f32));
+    std.debug.print("Buffering {d} points\n", .{vertices.len});
     c.glBufferData(c.GL_ARRAY_BUFFER, vertices_size, vertices.ptr, c.GL_STATIC_DRAW);
 
     // Configure vertex attributes
@@ -89,9 +93,12 @@ fn setupVertexData(allocator: Allocator) !OpenGLObjects {
     c.glBindBuffer(c.GL_ARRAY_BUFFER, 0);
     c.glBindVertexArray(0);
 
+    // c.glPolygonMode(c.GL_FRONT_AND_BACK, c.GL_LINE);
+
     return OpenGLObjects{
         .VAO = VAO,
         .VBO = VBO,
+        .num_vertices = vertices.len,
         .shader_program = shader_program,
     };
 }
@@ -108,8 +115,25 @@ fn renderFrame(gl_objects: OpenGLObjects) void {
 
     // Draw the triangle
     c.glUseProgram(gl_objects.shader_program);
+
+    
+    // const time: f32 = @floatCast(c.glfwGetTime() * 4);
+    // const up_x = 0.5 * std.math.sin(4*time) + 0.5;
+    // std.debug.print("{d}\n", .{up_x});
+    const eye = Vec3d{ 0, -1, 0 };
+    const center = Vec3d{ 0.0, 0, 0.0 };
+    // const up = Vec3d{ std.math.sin(time), std.math.cos(time), 0};
+    const up = Vec3d{0, 0, 1 };
+
+    const view4x4 = lookAt(eye, center, up);
+    const view = flatten(view4x4);
+    // std.debug.print("{d}\n", .{view4x4});
+
+    const viewLoc = c.glGetUniformLocation(gl_objects.shader_program, "transform");
+    c.glUniformMatrix4fv(viewLoc, 1, c.GL_FALSE, &view);
+
     c.glBindVertexArray(gl_objects.VAO);
-    c.glDrawArrays(c.GL_TRIANGLES, 0, 3);
+    c.glDrawArrays(c.GL_TRIANGLES, 0, @intCast(gl_objects.num_vertices));
 }
 
 fn cleanup(gl_objects: OpenGLObjects) void {
@@ -127,7 +151,7 @@ fn checkGLError(location: []const u8) void {
 }
 
 pub fn main() !void {
-    const width = 800;
+    const width = 600;
     const height = 600;
 
     // Initialize GLFW
@@ -160,24 +184,103 @@ pub fn main() !void {
 }
 
 fn get_vertices(allocator: Allocator) ![]f32 {
-    const vertices = [_]f32{ -0.5, -0.5, 0.0, 0.5, -0.5, 0.0, 0.0, 0.5, 0.0 };
+    var shape_file = try std.fs.cwd().openFile("shape2.csv", .{ .mode = .read_only });
+    defer shape_file.close();
+    const allFileBytes = try shape_file.readToEndAlloc(allocator, 10_000_000);
+    defer allocator.free(allFileBytes);
 
+    // The file is a list of triples float,float,float\n
     // Allocate memory for the vertices
-    const heap_vertices = try allocator.alloc(f32, vertices.len);
+    // Each line is like 50 characters, and we need 3 floats per line
+    var heap_vertices = try std.ArrayList(f32).initCapacity(allocator, (50 / allFileBytes.len) * 3);
 
-    // Copy the vertices to heap memory
-    @memcpy(heap_vertices, &vertices);
-    return heap_vertices;
+    var current_float_buff: [50]u8 = undefined;
+    var i: usize = 0;
+
+    for (allFileBytes) | char | {
+        // std.debug.print("{c}\n", .{char});
+        if (char == ',' or char == '\n') {
+            const item = try std.fmt.parseFloat(f32, current_float_buff[0..i]);
+            try heap_vertices.append(item);
+            i = 0;
+        }
+        else if (char == ' ' or char == '\r') {}
+        else {
+            // We use a fixed buffer. It should never overflow.
+            current_float_buff[i] = char;
+            i += 1;
+        }
+    }
+    if (i != 0) {
+        const item = try std.fmt.parseFloat(f32, current_float_buff[0..i]);
+        try heap_vertices.append(item);
+    }
+
+    // scale the vertices to be between -1 and 1.
+    var max: f32 = -1e60;
+    var min: f32 = 1e60;
+
+    var result = heap_vertices.items;
+    for (result) | unscaled  | {
+        max = @max(max, unscaled);
+        min = @min(min, unscaled);
+    }
+    const scale = 1.5/(max-min);
+
+    for (0..result.len) | idx | {
+        // std.debug.print("{d} -> {d}\n", .{result[idx], scale * (result[idx]-min) - 0.75});
+        result[idx] = scale * (result[idx]-min) - 0.75;
+        if (result[idx] > 1 or result[idx] < -1)
+            return error.PointsOutOfRange;
+    }
+
+    // std.debug.print("Got {d} Points\n", .{result.len});
+    return result;
+}
+
+fn cross(a: Vec3d, b: Vec3d) Vec3d {
+    return .{
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0],
+    };
+}
+
+fn dot(a: Vec3d, b: Vec3d) f32 {
+    return @reduce(.Add, a * b);
+}
+
+fn normalize(v: Vec3d) Vec3d {
+    const v_mag: Vec3d = @splat(std.math.sqrt(dot(v, v)));
+    return v / v_mag;
+}
+
+fn lookAt(eye: Vec3d, center: Vec3d, up: Vec3d) [4]Vec4d {
+    const f = normalize(center - eye);
+    const s = normalize(cross(f, up));
+    const u = cross(s, f);
+    const neg_f = -f;
+
+    return .{
+        .{ s[0], u[0], neg_f[0], 0.0 },
+        .{ s[1], u[1], neg_f[1], 0.0 },
+        .{ s[2], u[2], neg_f[2], 0.0 },
+        .{ -dot(s, eye), -dot(u, eye), -dot(f, eye), 1.0 },
+    };
+}
+
+fn flatten(mat: [4]@Vector(4, f32)) [16]f32 {
+    return @bitCast(mat);
 }
 
 fn get_vertex_shader() c_uint {
     const vertex_shader =
         \\#version 330 core
         \\layout (location = 0) in vec3 aPos;
-        \\
+        \\uniform mat4 transform;
         \\void main()
         \\{
-        \\  gl_Position = vec4(aPos.x, aPos.y, aPos.z, 1.0);
+        \\  gl_Position = transform * vec4(aPos, 1.0);
         \\}
     ;
     const shader_ptr = c.glCreateShader(c.GL_VERTEX_SHADER);
