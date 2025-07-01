@@ -4,8 +4,13 @@ const c = @cImport({
 });
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Vec3d = @Vector(3, f32);
-const Vec4d = @Vector(4, f32);
+const Vec3f = @Vector(3, f32);
+const Vec4f = @Vector(4, f32);
+const Mat4f = [4]Vec4f;
+
+const xaxis = Vec3f{ 1.0, 0.0, 0.0 };
+const yaxis = Vec3f{ 0.0, 1.0, 0.0 };
+const zaxis = Vec3f{ 0.0, 0.0, 1.0 };
 
 // OpenGL objects struct to keep related data together
 const OpenGLObjects = struct {
@@ -93,7 +98,7 @@ fn setupVertexData(allocator: Allocator) !OpenGLObjects {
     c.glBindBuffer(c.GL_ARRAY_BUFFER, 0);
     c.glBindVertexArray(0);
 
-    // c.glPolygonMode(c.GL_FRONT_AND_BACK, c.GL_LINE);
+    c.glPolygonMode(c.GL_FRONT_AND_BACK, c.GL_LINE);
 
     return OpenGLObjects{
         .VAO = VAO,
@@ -108,7 +113,7 @@ fn setupViewport(window: *c.GLFWwindow, width: c_int, height: c_int) void {
     _ = c.glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 }
 
-fn renderFrame(gl_objects: OpenGLObjects) void {
+fn renderFrame(gl_objects: OpenGLObjects) !void {
     // Clear the screen
     c.glClearColor(0.2, 0.3, 0.3, 1.0);
     c.glClear(c.GL_COLOR_BUFFER_BIT);
@@ -117,23 +122,32 @@ fn renderFrame(gl_objects: OpenGLObjects) void {
     c.glUseProgram(gl_objects.shader_program);
 
     
-    // const time: f32 = @floatCast(c.glfwGetTime() * 4);
+    const time: f32 = @floatCast(c.glfwGetTime() * 4);
+
+    const id: Mat4f = iden();
+    // Apply a rotation around the Y axis
+    const angle = degToRad(time * 30); // Rotate 30 degrees per second
+    const rotation = rotate(angle, xaxis);
+    const scale_half = scale(Vec3f{ 0.5, 0.5, 0.5 });
+    const view4x4 = matmul(scale_half, matmul(id, rotation));
     // const up_x = 0.5 * std.math.sin(4*time) + 0.5;
     // std.debug.print("{d}\n", .{up_x});
-    const eye = Vec3d{ 0, -1, 0 };
-    const center = Vec3d{ 0.0, 0, 0.0 };
-    // const up = Vec3d{ std.math.sin(time), std.math.cos(time), 0};
-    const up = Vec3d{0, 0, 1 };
+    // const eye = Vec3f{ 0, 0, 1 };
+    // const center = Vec3f{ 0.0, 0, 0.0 };
+    // const up = Vec3f{0, 1, 0 };
 
-    const view4x4 = lookAt(eye, center, up);
+    // const view4x4 = lookAt(eye, center, up);
     const view = flatten(view4x4);
     // std.debug.print("{d}\n", .{view4x4});
 
     const viewLoc = c.glGetUniformLocation(gl_objects.shader_program, "transform");
+    if (viewLoc == -1)
+        return error.CantRetrieveLoc;
     c.glUniformMatrix4fv(viewLoc, 1, c.GL_FALSE, &view);
-
     c.glBindVertexArray(gl_objects.VAO);
+    checkGLError("Set Uniform");
     c.glDrawArrays(c.GL_TRIANGLES, 0, @intCast(gl_objects.num_vertices));
+    checkGLError("Draw Arrays");
 }
 
 fn cleanup(gl_objects: OpenGLObjects) void {
@@ -174,7 +188,7 @@ pub fn main() !void {
     // Main render loop
     while (c.glfwWindowShouldClose(window) != 1) {
         processInputs(window);
-        renderFrame(gl_objects);
+        try renderFrame(gl_objects);
         c.glfwSwapBuffers(window);
         c.glfwPollEvents();
     }
@@ -184,7 +198,7 @@ pub fn main() !void {
 }
 
 fn get_vertices(allocator: Allocator) ![]f32 {
-    var shape_file = try std.fs.cwd().openFile("shape2.csv", .{ .mode = .read_only });
+    var shape_file = try std.fs.cwd().openFile("shape.csv", .{ .mode = .read_only });
     defer shape_file.close();
     const allFileBytes = try shape_file.readToEndAlloc(allocator, 10_000_000);
     defer allocator.free(allFileBytes);
@@ -225,11 +239,11 @@ fn get_vertices(allocator: Allocator) ![]f32 {
         max = @max(max, unscaled);
         min = @min(min, unscaled);
     }
-    const scale = 1.5/(max-min);
+    const scale_factor = 1.5/(max-min);
 
     for (0..result.len) | idx | {
         // std.debug.print("{d} -> {d}\n", .{result[idx], scale * (result[idx]-min) - 0.75});
-        result[idx] = scale * (result[idx]-min) - 0.75;
+        result[idx] = scale_factor * (result[idx]-min) - 0.75;
         if (result[idx] > 1 or result[idx] < -1)
             return error.PointsOutOfRange;
     }
@@ -238,7 +252,16 @@ fn get_vertices(allocator: Allocator) ![]f32 {
     return result;
 }
 
-fn cross(a: Vec3d, b: Vec3d) Vec3d {
+fn iden() Mat4f {
+    return .{
+        .{ 1.0, 0.0, 0.0, 0.0 },
+        .{ 0.0, 1.0, 0.0, 0.0 },
+        .{ 0.0, 0.0, 1.0, 0.0 },
+        .{ 0.0, 0.0, 0.0, 1.0 },
+    };
+}
+
+fn cross(a: Vec3f, b: Vec3f) Vec3f {
     return .{
         a[1]*b[2] - a[2]*b[1],
         a[2]*b[0] - a[0]*b[2],
@@ -246,30 +269,68 @@ fn cross(a: Vec3d, b: Vec3d) Vec3d {
     };
 }
 
-fn dot(a: Vec3d, b: Vec3d) f32 {
+fn dot(a: Vec3f, b: Vec3f) f32 {
     return @reduce(.Add, a * b);
 }
 
-fn normalize(v: Vec3d) Vec3d {
-    const v_mag: Vec3d = @splat(std.math.sqrt(dot(v, v)));
+fn normalize(v: Vec3f) Vec3f {
+    const v_mag: Vec3f = @splat(std.math.sqrt(dot(v, v)));
     return v / v_mag;
 }
 
-fn lookAt(eye: Vec3d, center: Vec3d, up: Vec3d) [4]Vec4d {
-    const f = normalize(center - eye);
-    const s = normalize(cross(f, up));
-    const u = cross(s, f);
-    const neg_f = -f;
+fn matmul(x: Mat4f, y: Mat4f) Mat4f {
+    var result: Mat4f = undefined;
+    for (0..4) |i| {
+        for (0..4) |j| {
+            result[i][j] = 0.0;
+            for (0..4) |k| {
+                result[i][j] += x[i][k] * y[k][j];
+            }
+        }
+    }
+    return result;
+}
 
+fn degToRad(degrees: f32) f32 {
+    return degrees * (std.math.pi / 180.0);
+}
+
+fn translate(translation: Vec3f) Mat4f {
     return .{
-        .{ s[0], u[0], neg_f[0], 0.0 },
-        .{ s[1], u[1], neg_f[1], 0.0 },
-        .{ s[2], u[2], neg_f[2], 0.0 },
-        .{ -dot(s, eye), -dot(u, eye), -dot(f, eye), 1.0 },
+        .{ 1.0, 0.0, 0.0, 0.0 },
+        .{ 0.0, 1.0, 0.0, 0.0 },
+        .{ 0.0, 0.0, 1.0, 0.0 },
+        .{ translation.x, translation.y, translation.z, 1.0 },
     };
 }
 
-fn flatten(mat: [4]@Vector(4, f32)) [16]f32 {
+fn rotate(angle_rad: f32, axis: Vec3f) Mat4f {
+    const co = std.math.cos(angle_rad);
+    const s = std.math.sin(angle_rad);
+    const t = 1.0 - co;
+    const x = axis[0];
+    const y = axis[1];
+    const z = axis[2];
+
+    return .{
+        .{ t*x*x + co,   t*x*y - s*z, t*x*z + s*y, 0.0 },
+        .{ t*x*y + s*z, t*y*y + co,   t*y*z - s*x, 0.0 },
+        .{ t*x*z - s*y, t*y*z + s*x, t*z*z + co,   0.0 },
+        .{ 0.0,         0.0,         0.0,         1.0 },
+    };
+}
+
+fn scale(scaling: Vec3f) Mat4f {
+    const x, const y, const z = scaling;
+    return .{
+        .{ x, 0.0, 0.0, 0.0 },
+        .{ 0.0, y, 0.0, 0.0 },
+        .{ 0.0, 0.0, z, 0.0 },
+        .{ 0.0, 0.0, 0.0, 1.0 },
+    };
+}
+
+fn flatten(mat: Mat4f) [16]f32 {
     return @bitCast(mat);
 }
 
@@ -278,9 +339,13 @@ fn get_vertex_shader() c_uint {
         \\#version 330 core
         \\layout (location = 0) in vec3 aPos;
         \\uniform mat4 transform;
+        \\out vec3 vertColor;
         \\void main()
         \\{
         \\  gl_Position = transform * vec4(aPos, 1.0);
+        \\  
+        \\  //vertColor = gl_Position.zyx;
+        \\  vertColor = vec3(1.0f, 0.5f, 0.2f);
         \\}
     ;
     const shader_ptr = c.glCreateShader(c.GL_VERTEX_SHADER);
@@ -300,12 +365,14 @@ fn get_fragment_shader() c_uint {
     const fragment_shader =
         \\#version 330 core
         \\out vec4 FragColor;
-        \\
+        \\in vec3 vertColor;
         \\void main()
         \\{
-        \\  FragColor = vec4(1.0f, 0.5f, 0.2f, 1.0f);
+        \\  FragColor = vec4(vertColor, 0.5f);
         \\}
     ;
+        // \\  FragColor = vec4(1.0f, 0.5f, 0.2f, 1.0f);
+
     const shader_ptr = c.glCreateShader(c.GL_FRAGMENT_SHADER);
     c.glShaderSource(shader_ptr, 1, @ptrCast(&fragment_shader), null);
     c.glCompileShader(shader_ptr);
